@@ -1,0 +1,15 @@
+version: '3.8'
+services:
+  strm-generator:
+    image: mafzle/strm-generator:latest 
+    container_name: strm-generator
+    environment:
+      - PUID=1000  # 修改为您宿主机的用户 UID (防止生成的文件没有权限删除)
+      - PGID=1000  # 修改为您宿主机的用户 GID
+      - TZ=Asia/Shanghai
+    volumes:
+      - ./data:/app               # 核心配置和日志持久化目录
+      - /volume1/video:/video     # 修改为您存放 STRM 的本地影音库绝对路径
+    ports:
+      - "38080:80"                # 左侧为访问端口
+    restart: unless-stopped
