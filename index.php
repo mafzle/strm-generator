@@ -497,7 +497,7 @@ function tailCustom($filepath, $lines = 1) {
             <div class="checkbox-group">
                 <label><input type="checkbox" id="cron_fast_inc" checked> 快增模式</label>
                 <label><input type="checkbox" id="cron_clean"> 清除残留</label>
-                <label><input type="checkbox" id="cron_clean_empty"> 清空目录</label>
+                <label><input type="checkbox" id="cron_clean_empty"> 清理空目录</label>
                 <label><input type="checkbox" id="cron_overwrite" checked> 覆盖生成</label>
             </div>
         </div>

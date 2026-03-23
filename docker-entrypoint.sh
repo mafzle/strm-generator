@@ -15,12 +15,10 @@ usermod -o -u "$PUID" www-data || true
 # 初始化 /app 目录
 mkdir -p /app/logs /app/locks
 
-# 如果是全新映射的数据目录，将代码复制进去
-if [ ! -f /app/index.php ]; then
-    echo "检测到空目录，正在初始化 Web 文件..."
-    cp /defaults/index.php /app/
-    cp /defaults/strm_generator.py /app/
-fi
+# 强制覆盖核心代码文件，确保每次重启或更新镜像时，使用的都是最新代码！
+echo "正在同步最新版 Web 和 核心脚本..."
+cp -f /defaults/index.php /app/
+cp -f /defaults/strm_generator.py /app/
 
 # 确保 www-data (即 apache) 拥有核心目录的读写执行权
 chown -R www-data:www-data /app

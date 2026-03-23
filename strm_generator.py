@@ -28,7 +28,6 @@ def get_logger(name, clear=False):
     if clear:
         log_file = os.path.join(LOGS_DIR, f"{name}.log")
         if os.path.exists(log_file):
-            # 缓冲机制：如果日志是60秒内刚被其他并行任务清空过的，则追加，防止串号和互相抹除
             if time.time() - os.path.getmtime(log_file) > 60:
                 mode = 'w'
         else:
@@ -41,18 +40,14 @@ def get_logger(name, clear=False):
 
 def write_system_log(name, start_dt, end_dt, stats):
     sys_log_path = os.path.join(LOGS_DIR, 'system.log')
-    
     start_str = start_dt.strftime('%Y-%m-%d %H.%M.%S')
     end_str = end_dt.strftime('%Y-%m-%d %H.%M.%S')
-    
     duration_sec = int((end_dt - start_dt).total_seconds())
     h = duration_sec // 3600
     m = (duration_sec % 3600) // 60
     s = duration_sec % 60
     duration_str = f"历时 {h:02d}.{m:02d}.{s:02d}"
-    
     log_line = f"[{name}] {start_str} | {end_str} | {duration_str} | 清理 {stats['cleared_dirs']} 个文件夹 | 清理 {stats['cleared_files']} 个文件 | 修复 {stats['fixed']} 个STRM文件 | 生成 {stats['generated']} 个STRM文件\n"
-    
     with open(sys_log_path, 'a', encoding='utf-8') as f:
         f.write(log_line)
 
@@ -79,7 +74,6 @@ def write_state(job_id, state_dict):
     except: pass
 
 def check_task_control(job_id, state_dict, logger):
-    """检测并执行 暂停 / 继续 / 终止 指令"""
     ctrl_file = os.path.join(LOCKS_DIR, f"{job_id}.ctrl")
     cmd = None
     if os.path.exists(ctrl_file):
@@ -150,7 +144,6 @@ def process_directory(current_path, config, logger, job_id, state_dict, stats, j
     openlist_root = config['openlist_root'].rstrip('/')
     keyword = config['path_keyword']
     
-    # 策略隔离判定
     if job_type == 'task':
         overwrite = custom_config.get('overwrite', config.get('overwrite', True))
         clean_residual = custom_config.get('clean', False)
@@ -161,7 +154,7 @@ def process_directory(current_path, config, logger, job_id, state_dict, stats, j
         clean_residual = config.get('clean_residual', False)
         clean_empty = config.get('clean_empty', False)
         fast_inc = custom_config.get('fast_inc', False)
-    else: # realtime
+    else:
         overwrite = config.get('overwrite', True)
         clean_residual = config.get('clean_residual', False)
         clean_empty = config.get('clean_empty', False)
@@ -208,7 +201,10 @@ def process_directory(current_path, config, logger, job_id, state_dict, stats, j
             encoded_suffix = urllib.parse.quote(file_suffix)
             strm_content_url = f"{base_url}{openlist_root}{encoded_suffix}"
             
-            os.makedirs(os.path.dirname(strm_path), exist_ok=True)
+            try:
+                os.makedirs(os.path.dirname(strm_path), exist_ok=True)
+                os.chmod(os.path.dirname(strm_path), 0o777) # 尝试对新建的目录赋最高权限，解决 Errno 13
+            except: pass
             
             need_write = True
             is_fix = False
@@ -227,6 +223,9 @@ def process_directory(current_path, config, logger, job_id, state_dict, stats, j
             if need_write:
                 try:
                     with open(strm_path, 'w', encoding='utf-8') as f: f.write(strm_content_url)
+                    try: os.chmod(strm_path, 0o666) # 赋予读写权限
+                    except: pass
+                    
                     if is_fix:
                         stats['fixed'] += 1
                         logger.info(f"[纠错更新] 成功: {strm_path}")
@@ -236,7 +235,7 @@ def process_directory(current_path, config, logger, job_id, state_dict, stats, j
                 except Exception as e:
                     logger.error(f"写入失败 {strm_path}: {e}")
 
-    # 2. 残留清理 (含文件和多余的文件夹)
+    # 2. 严格对齐的残留清理逻辑 (满足您的第一点需求)
     if clean_residual and os.path.exists(local_dir):
         whitelist_str = config.get('clean_whitelist', '.actors,extrafanart,metadata,theme-music')
         ignore_keywords = [k.strip().lower() for k in whitelist_str.split(',') if k.strip()]
@@ -245,29 +244,37 @@ def process_directory(current_path, config, logger, job_id, state_dict, stats, j
             if not check_task_control(job_id, state_dict, logger): return False
             local_full_path = os.path.join(local_dir, local_f)
             
-            # 清理多余文件夹 (本地存在，但 OpenList 已经删除)
+            # 清理多余文件夹 (本地存在，但 OpenList 上完全没有)
             if os.path.isdir(local_full_path):
                 if local_f not in valid_dir_names:
                     # 检测是否命中配置里的白名单关键词
-                    is_ignored = any(kw in local_f.lower() for kw in ignore_keywords)
+                    is_ignored_dir = any(kw in local_f.lower() for kw in ignore_keywords)
                     
-                    # 深度检测：如果目录深层包含任何有效的 .strm 文件，则放弃清理该目录以防误删
-                    if not is_ignored:
-                        for r, d, f in os.walk(local_full_path):
-                            if any(file.lower().endswith('.strm') for file in f):
-                                is_ignored = True
-                                break
-                    
-                    if is_ignored:
-                        logger.info(f"[清理跳过] 命中白名单或内含STRM文件: {local_full_path}")
+                    if is_ignored_dir:
+                        # 白名单保护：保留目录外壳，但必须深入清理内部失效的 STRM 及配套图片信息
+                        logger.info(f"[清理残留] 目录命中白名单，保留躯壳，但同步清理失效的影视文件: {local_full_path}")
+                        for r, d, f_list in os.walk(local_full_path):
+                            for file in f_list:
+                                if file.endswith('.strm'):
+                                    f_base = os.path.splitext(file)[0]
+                                    for td in [file, f_base + '.nfo', f_base + '-thumb.jpg', f_base + '.jpg']:
+                                        td_path = os.path.join(r, td)
+                                        if os.path.exists(td_path):
+                                            try:
+                                                os.remove(td_path)
+                                                stats['cleared_files'] += 1
+                                                logger.info(f"[清理残留文件] 删除失效STRM及配套: {td_path}")
+                                            except: pass
                     else:
+                        # 非白名单：直接连根拔起彻底删除
                         try:
                             shutil.rmtree(local_full_path, ignore_errors=True)
                             stats['cleared_dirs'] += 1
-                            logger.info(f"[清理残留目录] 删除: {local_full_path}")
-                        except: pass
+                            logger.info(f"[清理残留目录] 连根拔起: {local_full_path}")
+                        except Exception as e:
+                            logger.error(f"删除目录失败(可能由于权限不足) {local_full_path}: {e}")
             
-            # 清理多余文件
+            # 清理多余文件 (当前目录层级)
             elif local_f.endswith('.strm'):
                 f_base = os.path.splitext(local_f)[0]
                 if f_base not in valid_video_basenames:
@@ -285,7 +292,7 @@ def process_directory(current_path, config, logger, job_id, state_dict, stats, j
         next_path = current_path.rstrip('/') + '/' + d['name']
         next_local_dir = os.path.join(local_dir, d['name'])
         
-        # 快增检测: 跳过已经存在的目录
+        # 快增检测: 只要在 AList 上存在，且本地也存在，就跳过内层扫描以节省 API
         if fast_inc and os.path.exists(next_local_dir):
             logger.info(f"[快增模式] 目录已存在，跳过扫描内部: {next_path}")
             continue
@@ -301,27 +308,25 @@ def process_directory(current_path, config, logger, job_id, state_dict, stats, j
         if not process_directory(next_path, config, logger, job_id, state_dict, stats, job_type, custom_config):
             return False
             
-    # 4. 回溯清理空目录
+    # 4. 回溯清理空目录 (如果勾选)
     if clean_empty and os.path.exists(local_dir):
         if not os.listdir(local_dir):
             try:
                 os.rmdir(local_dir)
                 stats['cleared_dirs'] += 1
                 logger.info(f"[清理空目录] 删除空壳: {local_dir}")
-            except: pass
+            except Exception as e:
+                logger.error(f"无法删除空壳目录 {local_dir}: {e}")
 
     return True
 
 def run_job(job_type, job_id, url=None):
-    """通用执行入口 (实时/定时任务/常用目录)"""
     config = load_json(CONFIG_FILE)
-    
     log_name = job_id
     if job_type == 'realtime': log_name = 'realtime'
     elif job_type == 'fav': log_name = 'favorites'
     
     logger = get_logger(log_name, clear=True)
-    
     start_dt = datetime.now()
     stats = {'generated': 0, 'fixed': 0, 'cleared_files': 0, 'cleared_dirs': 0}
     state_dict = {"pid": os.getpid(), "status": "waiting", "start_time": int(time.time())}
@@ -380,23 +385,17 @@ def run_job(job_type, job_id, url=None):
         logger.info(f"[{job_name}] 执行结束！")
     finally:
         write_system_log(job_name, start_dt, datetime.now(), stats)
-        
-        # 释放线程锁
         if config.get('thread_isolation') and os.path.exists(lock_file):
             try:
                 with open(lock_file, 'r') as f: current_lock_pid = f.read().strip()
                 if current_lock_pid == my_pid: os.remove(lock_file)
             except: pass
-            
-        # 更新数据库的上次执行时间
         if not is_realtime:
             data_file = TASKS_FILE if job_type == 'task' else FAVS_FILE
             records = load_json(data_file)
             for r in records:
                 if r['id'] == job_id: r['last_run'] = int(time.time())
             save_json(data_file, records)
-        
-        # 销毁内存状态锁
         state_path = os.path.join(LOCKS_DIR, f"{job_id if job_type != 'realtime' else 'realtime'}.state")
         if os.path.exists(state_path):
             try: os.remove(state_path)
@@ -412,31 +411,25 @@ def daemon_loop():
             tasks = load_json(TASKS_FILE)
             now = datetime.now()
             midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
-            
             for t in tasks:
                 if t.get('status') != 'enabled': continue
-                
                 period_sec = 0
                 if t['unit'] == 'day': period_sec = t['value'] * 86400
                 elif t['unit'] == 'hour': period_sec = t['value'] * 3600
                 elif t['unit'] == 'minute': period_sec = t['value'] * 60
                 if period_sec == 0: continue
-                
                 elapsed_sec = (now - midnight).total_seconds()
                 intervals_since_midnight = int(elapsed_sec // period_sec)
                 last_scheduled_time = midnight + timedelta(seconds=intervals_since_midnight * period_sec)
                 last_run_dt = datetime.fromtimestamp(t.get('last_run', 0))
-                
                 if last_run_dt < last_scheduled_time:
                     logger.info(f"触发定时任务: {t['name']}")
                     cmd = f"nohup python3 \"{os.path.abspath(__file__)}\" --action task --job_id \"{t['id']}\" > /dev/null 2>&1 &"
                     os.system(cmd)
                     t['last_run'] = int(time.time())
                     save_json(TASKS_FILE, tasks)
-                    
         except Exception as e:
             logger.error(f"Daemon error: {e}")
-            
         time.sleep(30)
 
 if __name__ == "__main__":
@@ -445,7 +438,6 @@ if __name__ == "__main__":
     parser.add_argument('--url', help='Target URL for realtime')
     parser.add_argument('--job_id', help='Job ID for task or fav run')
     parser.add_argument('--daemon', action='store_true', help='Run as cron daemon')
-    
     args = parser.parse_args()
     if args.daemon: daemon_loop()
     elif args.action == 'realtime' and args.url: run_job('realtime', 'realtime', args.url)
